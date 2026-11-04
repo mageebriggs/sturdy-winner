@@ -1,0 +1,77 @@
+name: Daily crypto brief
+
+on:
+  schedule:
+    # 6:45am Central. Two entries because cron is UTC and Central has DST;
+    # gate.py lets only the right one through each day.
+    - cron: "45 11 * * *"   # CDT (summer)
+    - cron: "45 12 * * *"   # CST (winter)
+  workflow_dispatch:
+    inputs:
+      send_sms:
+        description: "Send the text message"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-brief
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.gate.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check it's 6:45 Central
+        id: gate
+        run: python newsletter/gate.py "${{ github.event_name }}" "${{ github.event.schedule }}" | tee -a "$GITHUB_OUTPUT"
+      - name: Build page and text
+        if: steps.gate.outputs.go == 'true'
+        run: python newsletter/build.py --out site --url "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.gate.outputs.go == 'true'
+        with:
+          path: site
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.go == 'true'
+        with:
+          name: sms
+          path: site/sms.txt
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  text:
+    needs: [build, deploy]
+    if: needs.build.outputs.go == 'true' && (github.event_name == 'schedule' || inputs.send_sms)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sms
+      - name: Send SMS
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+          SMS_TO: ${{ secrets.SMS_TO }}
+        run: python3 newsletter/send_sms.py sms.txt
